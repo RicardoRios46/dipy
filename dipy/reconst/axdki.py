@@ -138,9 +138,13 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
 
-        params = ols_fit_axdki(
-            
-        )
+        params_A1 = ols_fit_axdki(self.gtab, self.ubvals, self.bvecs, mask)
+
+        params_A2 = fast_vectorize_solve(mask, self.ubvals)
+
+        params = list(params_A1) + list(params_A2)
+
+        return AxialSymmetricDiffusionKurtosisFit(self, params)
     
     @warning_for_keywords()
     def predict(self, axdki_params, *, S0=1.0):
@@ -173,69 +177,70 @@ class AxialSymmetricDiffusionKurtosisFit:
         self.model_params = model_params
         self.model_S0 = model_S0
         
-    def __getitem__(self, index):
-        model_params = self.model_params
-        model_S0 = self.model_S0
-        N = model_params.ndim
-        if type(index) is not tuple:
-            index = (index,)
-        elif len(index) >= model_params.ndim:
-            raise IndexError("IndexError: invalid index")
-        index = index + (slice(None),) * (N - len(index))
-        if model_S0 is not None:
-            model_S0 = model_S0[index[:-1]]
-        return AxialSymmetricDiffusionKurtosisFit(
-            self.model, model_params[index], model_S0=model_S0
-            )
+    # def __getitem__(self, index):
+    #     model_params = self.model_params
+    #     model_S0 = self.model_S0
+    #     N = model_params.ndim
+    #     if type(index) is not tuple:
+    #         index = (index,)
+    #     elif len(index) >= model_params.ndim:
+    #         raise IndexError("IndexError: invalid index")
+    #     index = index + (slice(None),) * (N - len(index))
+    #     if model_S0 is not None:
+    #         model_S0 = model_S0[index[:-1]]
+    #     return AxialSymmetricDiffusionKurtosisFit(
+    #         self.model, model_params[index], model_S0=model_S0
+    #         )
     
     @property
     def S0_hat(self):
         return self.model_S0
 
     @auto_attr
+    def Dperp(self): return self.model_params[0]
+
+    @auto_attr
+    def Dpara(self): return self.model_params[1]
+
+    @auto_attr
+    def Wperp_raw(self): return self.model_params[2]
+
+    @auto_attr
+    def Wpara_raw(self): return self.model_params[3]
+
+    @auto_attr
+    def Wmean_raw(self): return self.model_params[4]
+
+    @auto_attr
+    def Dpowder(self): return self.model_params[5]
+
+    @auto_attr
+    def Wpowder_raw(self): return self.model_params[6]
+
+    @auto_attr
     def dmean(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (1/3*Dpara + 2/3*Dperp)
+        # Now Dpara and Dperp are accessible as self.Dpara and self.Dperp
+        return (1/3 * self.Dpara + 2/3 * self.Dperp)
 
     @auto_attr
     def Wperp(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (Wperp/(Dperp**2))
+        # Normalized Kurtosis: W / D^2
+        return self.Wperp_raw / (self.Dperp**2 + 1e-6)
 
     @auto_attr
     def Wpara(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (Wpara/(Dpara**2))
+        return self.Wpara_raw / (self.Dpara**2 + 1e-6)
 
     @auto_attr
     def Wmean(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (Wmean/(Dmean**2))
+        return self.Wmean_raw / (self.dmean**2 + 1e-6)
 
     @auto_attr
     def Wpowder(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (Wpowder/(Dpowder**2))
-
-    @auto_attr
-    def Wpowder(self):
-        """
-        Mean diffusion calculated.
-        """
-        return (np.sqrt( 3/2* ((Dpara-Dmean)**2+2*(Dperp-Dmean)**2) / (Dpara**2 + 2*Dperp**2) ))
+        return self.Wpowder_raw / (self.Dpowder**2 + 1e-6)
 
 @warning_for_keywords()
-def ols_fit_axdki(mask):
+def ols_fit_axdki(gtab, ubvals, ubvecs, mask):
     r"""
     Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
     """
@@ -245,6 +250,8 @@ def ols_fit_axdki(mask):
 
     S = np.log(np.clip(mask, 1e-6, None))
     S = S.reshape(Nvox, nt)
+
+    A = design_matrix_A1(gtab, ubvals, ubvecs)
 
     A = A.reshape(Nvox, nt, 6)
     mask_flat = mask.reshape(Nvox)
@@ -300,7 +307,7 @@ def fast_vectorize_solve(mask, bvals):
     Dpowder = X[1]
     Wpowder = X[2]
 
-    return (logS0, Dpowder, Wpowder)
+    return (Dpowder, Wpowder)
 
 
 def design_matrix_A1(gtab, ubvals, bvecs):
