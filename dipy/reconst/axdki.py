@@ -8,6 +8,8 @@ from dipy.core.gradients import check_multi_b, round_bvals, unique_bvals_magnitu
 from dipy.testing.decorators import warning_for_keywords
 from dipy.reconst.dti import TensorModel
 
+from dipy.core.onetime import auto_attr
+
 @warning_for_keywords()
 def axdki_predictions(axdki_params, gtab, *, S0=1):
     """
@@ -27,10 +29,9 @@ def axdki_predictions(axdki_params, gtab, *, S0=1):
     .. footbibliography::
     """
 
-    
 
 @warning_for_keywords()
-def _get_principal_eigvec(gtab, mask):
+def _get_principal_eigvec(gtab, mask=None):
     """
     Compute the principal eigenvector for the first part of the algorithm.
 
@@ -46,11 +47,44 @@ def _get_principal_eigvec(gtab, mask):
 
     tenmodel = TensorModel(gtab, fit_method="WLS")
 
-    tenfit = tenmodel.fit(mask)
+    tenfit = tenmodel.fit()
 
     principal_eigenvector = tenfit.evecs.astype(np.float32)[:,:,:,:,0] # extract first eigenvector
 
     return principal_eigenvector
+
+@warning_for_keywords()
+def _get_powder_average(bvals, mask):
+    """
+    Compute powder average
+    """
+    b_unique = np.unique(bvals)
+    b_unique = np.sort(b_unique)
+
+    # tolérance (comme opt.bthresh MATLAB)
+    b_thresh = 50  
+
+    nx, ny, nz, nt = mask.shape
+
+    S_powder_list = []
+
+    for b in b_unique:
+        inds = np.abs(bvals - b) < b_thresh
+        # moyenne sur directions
+        S_mean = np.mean(mask[..., inds], axis=-1)  # (nx,ny,nz)
+        S_powder_list.append(S_mean)
+
+    S_powder = np.stack(S_powder_list, axis=0)
+    S_powder = np.clip(S_powder, 1e-6, None)
+    logS = np.log(S_powder)
+
+    nb = len(b_unique)
+    Nvox = nx * ny * nz
+
+    logS = logS.reshape(nb, -1)
+
+    return logS
+
 
 class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
     """Axial Symmetric Diffusion Kurtosis Model"""
@@ -76,7 +110,8 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
         self.return_S0_hat = return_S0_hat
         self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
-        self.design_matrix_A1 = design_matrix_A1(self.ubvals)
+        self.bvecs = gtab.bvecs
+        self.design_matrix_A1 = design_matrix_A1(self.gtab, self.ubvals,self.bvecs)
         self.design_matrix_A2 = design_matrix_A2(self.ubvals)
         self.bmag = bmag
         self.args = args
@@ -102,8 +137,6 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         mask : array
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
-
-        principal_eigenvector = _get_principal_eigvec(data, mask)
 
         params = ols_fit_axdki(
             
@@ -140,7 +173,66 @@ class AxialSymmetricDiffusionKurtosisFit:
         self.model_params = model_params
         self.model_S0 = model_S0
         
+    def __getitem__(self, index):
+        model_params = self.model_params
+        model_S0 = self.model_S0
+        N = model_params.ndim
+        if type(index) is not tuple:
+            index = (index,)
+        elif len(index) >= model_params.ndim:
+            raise IndexError("IndexError: invalid index")
+        index = index + (slice(None),) * (N - len(index))
+        if model_S0 is not None:
+            model_S0 = model_S0[index[:-1]]
+        return AxialSymmetricDiffusionKurtosisFit(
+            self.model, model_params[index], model_S0=model_S0
+            )
+    
+    @property
+    def S0_hat(self):
+        return self.model_S0
 
+    @auto_attr
+    def dmean(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (1/3*Dpara + 2/3*Dperp)
+
+    @auto_attr
+    def Wperp(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (Wperp/(Dperp**2))
+
+    @auto_attr
+    def Wpara(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (Wpara/(Dpara**2))
+
+    @auto_attr
+    def Wmean(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (Wmean/(Dmean**2))
+
+    @auto_attr
+    def Wpowder(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (Wpowder/(Dpowder**2))
+
+    @auto_attr
+    def Wpowder(self):
+        """
+        Mean diffusion calculated.
+        """
+        return (np.sqrt( 3/2* ((Dpara-Dmean)**2+2*(Dperp-Dmean)**2) / (Dpara**2 + 2*Dperp**2) ))
 
 @warning_for_keywords()
 def ols_fit_axdki(mask):
@@ -176,9 +268,42 @@ def ols_fit_axdki(mask):
     Wpara=X[:,:,:,4]
     Wmean=X[:,:,:,5]
 
-    return None
+    return (Dperp, Dpara, Wperp, Wpara, Wmean)
 
-def design_matrix_A1(ubvals, principal_eigenvec, bvecs):
+@warning_for_keywords()
+def fast_vectorize_solve(mask, bvals):
+    """
+    Fast vectorize solve
+    """
+    nx, ny, nz, nt = mask.shape
+
+    Ap = design_matrix_A2(bvals)
+
+    logS = _get_powder_average(bvals, mask)
+
+    ATA = Ap.T @ Ap
+    ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
+    AT = Ap.T
+
+    # solution globale
+    X = ATA_inv @ (AT @ logS)   # (3, Nvox)
+
+    # appliquer masque
+    X[:, ~mask] = 0
+
+    # =========================
+    # RESHAPE OUTPUTS
+    # =========================
+    X = X.reshape(3, nx, ny, nz)
+
+    logS0 = X[0]
+    Dpowder = X[1]
+    Wpowder = X[2]
+
+    return (logS0, Dpowder, Wpowder)
+
+
+def design_matrix_A1(gtab, ubvals, bvecs):
     """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
     
     Parameters
@@ -190,8 +315,10 @@ def design_matrix_A1(ubvals, principal_eigenvec, bvecs):
     -------
     design_matrix : array
     """
+    principal_eigvec = _get_principal_eigvec(gtab)
+
     # calculus of cos(theta)
-    cos_theta = np.einsum('xyzi,ti->xyzt', principal_eigenvec, bvecs)
+    cos_theta = np.einsum('xyzi,ti->xyzt', principal_eigvec, bvecs)
 
     b = ubvals[None, None, None, :]
     c = cos_theta
@@ -209,7 +336,7 @@ def design_matrix_A1(ubvals, principal_eigenvec, bvecs):
 
     return A
 
-def design_matrix_A2(ubvals, principal_eigenvec, bvecs):
+def design_matrix_A2(ubvals):
     """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
     
     Parameters
@@ -221,5 +348,15 @@ def design_matrix_A2(ubvals, principal_eigenvec, bvecs):
     -------
     design_matrix : array
     """
-    # calculus of cos(theta)
-    return None
+    b_unique = np.unique(ubvals)
+    b_unique = np.sort(b_unique)
+
+    b = b_unique[:, None]  # (nb,1)
+
+    Ap = np.concatenate([
+        np.ones_like(b),   # S0
+        -b,                # D
+        (b**2) / 6         # W
+    ], axis=1)             # (nb, 3)
+
+    return Ap
