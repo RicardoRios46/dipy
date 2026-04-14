@@ -31,7 +31,7 @@ def axdki_predictions(axdki_params, gtab, *, S0=1):
 
 
 @warning_for_keywords()
-def _get_principal_eigvec(gtab, mask=None):
+def _get_principal_eigvec(data, gtab, mask=None):
     """
     Compute the principal eigenvector for the first part of the algorithm.
 
@@ -47,7 +47,7 @@ def _get_principal_eigvec(gtab, mask=None):
 
     tenmodel = TensorModel(gtab, fit_method="WLS")
 
-    tenfit = tenmodel.fit()
+    tenfit = tenmodel.fit(data)
 
     principal_eigenvector = tenfit.evecs.astype(np.float32)[:,:,:,:,0] # extract first eigenvector
 
@@ -89,7 +89,7 @@ def _get_powder_average(bvals, mask):
 class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
     """Axial Symmetric Diffusion Kurtosis Model"""
 
-    def __init__(self, gtab, *args, bmag=None, return_S0_hat=False, **kwargs):
+    def __init__(self, data, gtab, *args, bmag=None, return_S0_hat=False, **kwargs):
         """
         Axial Symmetric Diffusion Kurtosis Model
         
@@ -110,9 +110,10 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
         self.return_S0_hat = return_S0_hat
         self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
+        self.bvals = gtab.bvals
         self.bvecs = gtab.bvecs
-        self.design_matrix_A1 = design_matrix_A1(self.gtab, self.ubvals,self.bvecs)
-        self.design_matrix_A2 = design_matrix_A2(self.ubvals)
+        self.design_matrix_A1 = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
+        self.design_matrix_A2 = design_matrix_A2(data, self.ubvals)
         self.bmag = bmag
         self.args = args
         self.kwargs = kwargs
@@ -126,7 +127,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
 
     @warning_for_keywords()
-    def fit(self, data, *, mask=None):
+    def fit(self, *, mask=None):
         """Fit method for the first part of of the AXDKI model class
         
         Parameters
@@ -138,7 +139,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
 
-        params_A1 = ols_fit_axdki(self.gtab, self.ubvals, self.bvecs, mask)
+        params_A1 = ols_fit_axdki(self.data, self.gtab, self.bvals, self.bvecs, mask)
 
         params_A2 = fast_vectorize_solve(mask, self.ubvals)
 
@@ -240,7 +241,7 @@ class AxialSymmetricDiffusionKurtosisFit:
         return self.Wpowder_raw / (self.Dpowder**2 + 1e-6)
 
 @warning_for_keywords()
-def ols_fit_axdki(gtab, ubvals, ubvecs, mask):
+def ols_fit_axdki(data, gtab, bvals, ubvecs, mask):
     r"""
     Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
     """
@@ -251,7 +252,7 @@ def ols_fit_axdki(gtab, ubvals, ubvecs, mask):
     S = np.log(np.clip(mask, 1e-6, None))
     S = S.reshape(Nvox, nt)
 
-    A = design_matrix_A1(gtab, ubvals, ubvecs)
+    A = design_matrix_A1(data, gtab, bvals, ubvecs)
 
     A = A.reshape(Nvox, nt, 6)
     mask_flat = mask.reshape(Nvox)
@@ -310,7 +311,7 @@ def fast_vectorize_solve(mask, bvals):
     return (Dpowder, Wpowder)
 
 
-def design_matrix_A1(gtab, ubvals, bvecs):
+def design_matrix_A1(data, gtab, bvals, bvecs):
     """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
     
     Parameters
@@ -322,12 +323,13 @@ def design_matrix_A1(gtab, ubvals, bvecs):
     -------
     design_matrix : array
     """
-    principal_eigvec = _get_principal_eigvec(gtab)
-
+    principal_eigvec = _get_principal_eigvec(data, gtab)
+    print(principal_eigvec.shape)
     # calculus of cos(theta)
     cos_theta = np.einsum('xyzi,ti->xyzt', principal_eigvec, bvecs)
-
-    b = ubvals[None, None, None, :]
+    print(cos_theta.shape)
+    print(bvals.shape)
+    b = bvals[None, None, None, :]
     c = cos_theta
     c2 = c**2
     c4 = c**4
