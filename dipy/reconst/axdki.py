@@ -54,7 +54,7 @@ def _get_principal_eigvec(data, gtab, mask=None):
     return principal_eigenvector
 
 @warning_for_keywords()
-def _get_powder_average(bvals, mask):
+def _get_powder_average(self, bvals):
     """
     Compute powder average
     """
@@ -64,14 +64,14 @@ def _get_powder_average(bvals, mask):
     # tolérance (comme opt.bthresh MATLAB)
     b_thresh = 50  
 
-    nx, ny, nz, nt = mask.shape
+    nx, ny, nz, nt = self.data.shape
 
     S_powder_list = []
 
     for b in b_unique:
         inds = np.abs(bvals - b) < b_thresh
         # moyenne sur directions
-        S_mean = np.mean(mask[..., inds], axis=-1)  # (nx,ny,nz)
+        S_mean = np.mean(self.data[..., inds], axis=-1)  # (nx,ny,nz)
         S_powder_list.append(S_mean)
 
     S_powder = np.stack(S_powder_list, axis=0)
@@ -109,11 +109,12 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         ReconstModel.__init__(self, gtab)
 
         self.return_S0_hat = return_S0_hat
+        self.data = data
         self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
         self.bvals = gtab.bvals
         self.bvecs = gtab.bvecs
         self.design_matrix_A1 = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
-        self.design_matrix_A2 = design_matrix_A2(data, self.ubvals)
+        self.design_matrix_A2 = design_matrix_A2(self.ubvals)
         self.bmag = bmag
         self.args = args
         self.kwargs = kwargs
@@ -124,6 +125,45 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             mes = "The `min_signal` key-word argument needs to be strictly"
             e_s += " postiive."
             raise ValueError(e_s)
+
+    @warning_for_keywords()
+    def ols_fit_axdki(self):
+        r"""
+        Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
+        """
+
+        nx, ny, nz, nt = self.data.shape
+        Nvox = nx * ny * nz
+
+        S = np.log(np.clip(self.data, 1e-6, None))
+        S = S.reshape(Nvox, nt)
+
+        #A = design_matrix_A1(data, gtab, bvals, ubvecs)
+        A = self.design_matrix_A1
+
+        A = A.reshape(Nvox, nt, 6)
+        #mask_flat = self.data.reshape(Nvox)
+
+        ATA = np.einsum('vti,vtj->vij', A, A)
+
+        ATy = np.einsum('vti,vt->vi', A, S)
+
+        I = np.eye(6)[None, :, :]  # (1,6,6)
+        ATA_reg = ATA + 1e-6 * I
+
+        X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
+
+        #X[~mask_flat] = 0
+
+        X = X.reshape(nx, ny, nz, 6)
+
+        Dperp=X[:,:,:,1]
+        Dpara=X[:,:,:,2]
+        Wperp=X[:,:,:,3]
+        Wpara=X[:,:,:,4]
+        Wmean=X[:,:,:,5]
+
+        return (Dperp, Dpara, Wperp, Wpara, Wmean)
 
 
     @warning_for_keywords()
@@ -139,7 +179,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
 
-        params_A1 = ols_fit_axdki(self.data, self.gtab, self.bvals, self.bvecs, mask)
+        params_A1 = self.ols_fit_axdki()
 
         params_A2 = fast_vectorize_solve(mask, self.ubvals)
 
@@ -169,6 +209,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         .. footbibliography::
         """
         return axdki_predictions(axdki_params, self.gtab, S0=S0)
+    
 
 class AxialSymmetricDiffusionKurtosisFit:
     @warning_for_keywords()
@@ -240,53 +281,17 @@ class AxialSymmetricDiffusionKurtosisFit:
     def Wpowder(self):
         return self.Wpowder_raw / (self.Dpowder**2 + 1e-6)
 
-@warning_for_keywords()
-def ols_fit_axdki(data, gtab, bvals, ubvecs, mask):
-    r"""
-    Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
-    """
-
-    nx, ny, nz, nt = mask.shape
-    Nvox = nx * ny * nz
-
-    S = np.log(np.clip(mask, 1e-6, None))
-    S = S.reshape(Nvox, nt)
-
-    A = design_matrix_A1(data, gtab, bvals, ubvecs)
-
-    A = A.reshape(Nvox, nt, 6)
-    mask_flat = mask.reshape(Nvox)
-
-    ATA = np.einsum('vti,vtj->vij', A, A)
-
-    ATy = np.einsum('vti,vt->vi', A, S)
-
-    I = np.eye(6)[None, :, :]  # (1,6,6)
-    ATA_reg = ATA + 1e-6 * I
-
-    X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
-
-    X[~mask_flat] = 0
-
-    X = X.reshape(nx, ny, nz, 6)
-
-    Dperp=X[:,:,:,1]
-    Dpara=X[:,:,:,2]
-    Wperp=X[:,:,:,3]
-    Wpara=X[:,:,:,4]
-    Wmean=X[:,:,:,5]
-
-    return (Dperp, Dpara, Wperp, Wpara, Wmean)
 
 @warning_for_keywords()
-def fast_vectorize_solve(mask, bvals):
+def fast_vectorize_solve(self, mask, bvals):
     """
     Fast vectorize solve
     """
-    nx, ny, nz, nt = mask.shape
+    nx, ny, nz, nt = self.data.shape
 
-    Ap = design_matrix_A2(bvals)
+    #Ap = design_matrix_A2(bvals)
 
+    Ap = self.design_matrix_A2
     logS = _get_powder_average(bvals, mask)
 
     ATA = Ap.T @ Ap
