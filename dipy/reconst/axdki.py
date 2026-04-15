@@ -54,7 +54,7 @@ def _get_principal_eigvec(data, gtab, mask=None):
     return principal_eigenvector
 
 @warning_for_keywords()
-def _get_powder_average(self, bvals):
+def _get_powder_average(data, bvals):
     """
     Compute powder average
     """
@@ -64,14 +64,14 @@ def _get_powder_average(self, bvals):
     # tolérance (comme opt.bthresh MATLAB)
     b_thresh = 50  
 
-    nx, ny, nz, nt = self.data.shape
+    nx, ny, nz, nt = data.shape
 
     S_powder_list = []
 
     for b in b_unique:
         inds = np.abs(bvals - b) < b_thresh
         # moyenne sur directions
-        S_mean = np.mean(self.data[..., inds], axis=-1)  # (nx,ny,nz)
+        S_mean = np.mean(data[..., inds], axis=-1)  # (nx,ny,nz)
         S_powder_list.append(S_mean)
 
     S_powder = np.stack(S_powder_list, axis=0)
@@ -165,6 +165,32 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
         return (Dperp, Dpara, Wperp, Wpara, Wmean)
 
+    @warning_for_keywords()
+    def fast_vectorize_solve(self):
+        """
+        Fast vectorize solve
+        """
+        nx, ny, nz, nt = self.data.shape
+
+        #Ap = design_matrix_A2(bvals)
+
+        Ap = self.design_matrix_A2
+        #logS = _get_powder_average(self.bvals)
+        logS = _get_powder_average(self.data, self.bvals)
+
+        ATA = Ap.T @ Ap
+        ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
+        AT = Ap.T
+
+        X = ATA_inv @ (AT @ logS)   
+        X = X.reshape(3, nx, ny, nz)
+
+        logS0 = X[0]
+        Dpowder = X[1]
+        Wpowder = X[2]
+
+        return (Dpowder, Wpowder)
+
 
     @warning_for_keywords()
     def fit(self, *, mask=None):
@@ -181,7 +207,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
         params_A1 = self.ols_fit_axdki()
 
-        params_A2 = fast_vectorize_solve(mask, self.ubvals)
+        params_A2 = self.fast_vectorize_solve()
 
         params = list(params_A1) + list(params_A2)
 
@@ -281,39 +307,6 @@ class AxialSymmetricDiffusionKurtosisFit:
     def Wpowder(self):
         return self.Wpowder_raw / (self.Dpowder**2 + 1e-6)
 
-
-@warning_for_keywords()
-def fast_vectorize_solve(self, mask, bvals):
-    """
-    Fast vectorize solve
-    """
-    nx, ny, nz, nt = self.data.shape
-
-    #Ap = design_matrix_A2(bvals)
-
-    Ap = self.design_matrix_A2
-    logS = _get_powder_average(bvals, mask)
-
-    ATA = Ap.T @ Ap
-    ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
-    AT = Ap.T
-
-    # solution globale
-    X = ATA_inv @ (AT @ logS)   # (3, Nvox)
-
-    # appliquer masque
-    X[:, ~mask] = 0
-
-    # =========================
-    # RESHAPE OUTPUTS
-    # =========================
-    X = X.reshape(3, nx, ny, nz)
-
-    logS0 = X[0]
-    Dpowder = X[1]
-    Wpowder = X[2]
-
-    return (Dpowder, Wpowder)
 
 
 def design_matrix_A1(data, gtab, bvals, bvecs):
