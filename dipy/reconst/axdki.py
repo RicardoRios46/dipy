@@ -89,7 +89,7 @@ def _get_powder_average(data, bvals):
 class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
     """Axial Symmetric Diffusion Kurtosis Model"""
 
-    def __init__(self, data, gtab, *args, bmag=None, return_S0_hat=False, **kwargs):
+    def __init__(self, gtab, *args, bmag=None, return_S0_hat=False, **kwargs):
         """
         Axial Symmetric Diffusion Kurtosis Model
         
@@ -109,12 +109,12 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         ReconstModel.__init__(self, gtab)
 
         self.return_S0_hat = return_S0_hat
-        self.data = data
+        # self.data = data
         self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
         self.bvals = gtab.bvals
         self.bvecs = gtab.bvecs
-        self.design_matrix_A1 = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
-        self.design_matrix_A2 = design_matrix_A2(self.ubvals)
+        # self.design_matrix_A1 = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
+        # self.design_matrix_A2 = design_matrix_A2(self.ubvals)
         self.bmag = bmag
         self.args = args
         self.kwargs = kwargs
@@ -127,7 +127,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             raise ValueError(e_s)
 
     @warning_for_keywords()
-    def ols_fit_axdki(self):
+    def ols_fit_axdki(self, data):
         r"""
         Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
         """
@@ -139,7 +139,8 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         S = S.reshape(Nvox, nt)
 
         #A = design_matrix_A1(data, gtab, bvals, ubvecs)
-        A = self.design_matrix_A1
+        A = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
+        self.design_matrix_A1 = A
 
         A = A.reshape(Nvox, nt, 6)
         #mask_flat = self.data.reshape(Nvox)
@@ -174,7 +175,8 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
         #Ap = design_matrix_A2(bvals)
 
-        Ap = self.design_matrix_A2
+        Ap = design_matrix_A2(self.ubvals)
+        self.design_matrix_A2 = Ap
         #logS = _get_powder_average(self.bvals)
         logS = _get_powder_average(self.data, self.bvals)
 
