@@ -2,6 +2,7 @@
 """Classes and functions for fitting the axial symmetric signal diffusion kurtosis model"""
 
 import numpy as np
+eps = np.finfo(float).eps
 from dipy.reconst.base import ReconstModel
 from dipy.core.gradients import check_multi_b, round_bvals, unique_bvals_magnitude
 
@@ -122,7 +123,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         # Check if at least three b-values are given
         enough_b = check_multi_b(self.gtab, 2, non_zero=False, bmag=bmag)
         if not enough_b:
-            mes = "The `min_signal` key-word argument needs to be strictly"
+            e_s = "The `min_signal` key-word argument needs to be strictly"
             e_s += " postiive."
             raise ValueError(e_s)
 
@@ -132,10 +133,10 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
         """
 
-        nx, ny, nz, nt = self.data.shape
+        nx, ny, nz, nt = data.shape
         Nvox = nx * ny * nz
 
-        S = np.log(np.clip(self.data, 1e-6, None))
+        S = np.log(np.clip(data, 1e-6, None))
         S = S.reshape(Nvox, nt)
 
         #A = design_matrix_A1(data, gtab, bvals, ubvecs)
@@ -143,7 +144,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         self.design_matrix_A1 = A
 
         A = A.reshape(Nvox, nt, 6)
-        #mask_flat = self.data.reshape(Nvox)
+        #mask_flat = data.reshape(Nvox)
 
         ATA = np.einsum('vti,vtj->vij', A, A)
 
@@ -167,18 +168,18 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         return (Dperp, Dpara, Wperp, Wpara, Wmean)
 
     @warning_for_keywords()
-    def fast_vectorize_solve(self):
+    def fast_vectorize_solve(self, data):
         """
         Fast vectorize solve
         """
-        nx, ny, nz, nt = self.data.shape
+        nx, ny, nz, nt = data.shape
 
         #Ap = design_matrix_A2(bvals)
 
         Ap = design_matrix_A2(self.ubvals)
         self.design_matrix_A2 = Ap
         #logS = _get_powder_average(self.bvals)
-        logS = _get_powder_average(self.data, self.bvals)
+        logS = _get_powder_average(data, self.bvals)
 
         ATA = Ap.T @ Ap
         ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
@@ -195,7 +196,7 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
 
 
     @warning_for_keywords()
-    def fit(self, *, mask=None):
+    def fit(self, data, mask=None):
         """Fit method for the first part of of the AXDKI model class
         
         Parameters
@@ -206,10 +207,9 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         mask : array
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
+        params_A1 = self.ols_fit_axdki(data)
 
-        params_A1 = self.ols_fit_axdki()
-
-        params_A2 = self.fast_vectorize_solve()
+        params_A2 = self.fast_vectorize_solve(data)
 
         params = list(params_A1) + list(params_A2)
 
@@ -295,19 +295,19 @@ class AxialSymmetricDiffusionKurtosisFit:
     @auto_attr
     def Wperp(self):
         # Normalized Kurtosis: W / D^2
-        return self.Wperp_raw / (self.Dperp**2 + 1e-6)
+        return self.Wperp_raw / (self.Dperp**2 + eps)
 
     @auto_attr
     def Wpara(self):
-        return self.Wpara_raw / (self.Dpara**2 + 1e-6)
+        return self.Wpara_raw / (self.Dpara**2 + eps)
 
     @auto_attr
     def Wmean(self):
-        return self.Wmean_raw / (self.dmean**2 + 1e-6)
+        return self.Wmean_raw / (self.dmean**2 + eps)
 
     @auto_attr
     def Wpowder(self):
-        return self.Wpowder_raw / (self.Dpowder**2 + 1e-6)
+        return self.Wpowder_raw / (self.Dpowder**2 + eps)
 
 
 
