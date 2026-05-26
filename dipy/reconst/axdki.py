@@ -48,7 +48,7 @@ def _get_principal_eigvec(data, gtab, mask=None):
 
     tenmodel = TensorModel(gtab, fit_method="WLS")
 
-    tenfit = tenmodel.fit(data)
+    tenfit = tenmodel.fit(data, mask=mask)
 
     principal_eigenvector = tenfit.evecs.astype(np.float32)[:,:,:,:,0] # extract first eigenvector
 
@@ -143,6 +143,10 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         params_A2 = fast_vectorize_solve(data, self.ubvals, self.bvals, mask=mask)
 
         params = list(params_A1) + list(params_A2)
+
+        # ToDo The coward route. Handle the masking inside the fit
+        if mask != None:
+            params = np.einsum('ijkl,ijk->ijkl', params, mask)
 
         return AxialSymmetricDiffusionKurtosisFit(self, params)
     
