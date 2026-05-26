@@ -145,8 +145,8 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         params = list(params_A1) + list(params_A2)
 
         # ToDo The coward route. Handle the masking inside the fit
-        if mask != None:
-            params = np.einsum('ijkl,ijk->ijkl', params, mask)
+        if mask is not None:
+            params = np.einsum('ijkl,jkl->ijkl', params, mask)
 
         return AxialSymmetricDiffusionKurtosisFit(self, params)
     
