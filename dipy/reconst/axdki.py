@@ -110,12 +110,9 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         ReconstModel.__init__(self, gtab)
 
         self.return_S0_hat = return_S0_hat
-        # self.data = data
         self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
         self.bvals = gtab.bvals
         self.bvecs = gtab.bvecs
-        # self.design_matrix_A1 = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
-        # self.design_matrix_A2 = design_matrix_A2(self.ubvals)
         self.bmag = bmag
         self.args = args
         self.kwargs = kwargs
@@ -139,8 +136,9 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         S = np.log(np.clip(data, 1e-6, None))
         S = S.reshape(Nvox, nt)
 
-        #A = design_matrix_A1(data, gtab, bvals, ubvecs)
-        A = design_matrix_A1(data, self.gtab, self.bvals,self.bvecs)
+        principal_eigvec = _get_principal_eigvec(data,  self.gtab)
+
+        A = design_matrix_A1(principal_eigvec, self.gtab)
         self.design_matrix_A1 = A
 
         A = A.reshape(Nvox, nt, 6)
@@ -311,7 +309,7 @@ class AxialSymmetricDiffusionKurtosisFit:
 
 
 
-def design_matrix_A1(data, gtab, bvals, bvecs):
+def design_matrix_A1(principal_eigvec, gtab):
     """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
     
     Parameters
@@ -323,12 +321,13 @@ def design_matrix_A1(data, gtab, bvals, bvecs):
     -------
     design_matrix : array
     """
-    principal_eigvec = _get_principal_eigvec(data, gtab)
-    print(principal_eigvec.shape)
+
+    bvals = gtab.bvals
+    bvecs = gtab.bvecs
+
     # calculus of cos(theta)
     cos_theta = np.einsum('xyzi,ti->xyzt', principal_eigvec, bvecs)
-    print(cos_theta.shape)
-    print(bvals.shape)
+    
     b = bvals[None, None, None, :]
     c = cos_theta
     c2 = c**2
