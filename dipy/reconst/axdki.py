@@ -124,74 +124,6 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
             e_s += " postiive."
             raise ValueError(e_s)
 
-    @warning_for_keywords()
-    def ols_fit_axdki(self, data):
-        r"""
-        Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
-        """
-
-        nx, ny, nz, nt = data.shape
-        Nvox = nx * ny * nz
-
-        S = np.log(np.clip(data, 1e-6, None))
-        S = S.reshape(Nvox, nt)
-
-        principal_eigvec = _get_principal_eigvec(data,  self.gtab)
-
-        A = design_matrix_A1(principal_eigvec, self.gtab)
-        self.design_matrix_A1 = A
-
-        A = A.reshape(Nvox, nt, 6)
-        #mask_flat = data.reshape(Nvox)
-
-        ATA = np.einsum('vti,vtj->vij', A, A)
-
-        ATy = np.einsum('vti,vt->vi', A, S)
-
-        I = np.eye(6)[None, :, :]  # (1,6,6)
-        ATA_reg = ATA + 1e-6 * I
-
-        X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
-
-        #X[~mask_flat] = 0
-
-        X = X.reshape(nx, ny, nz, 6)
-
-        Dperp=X[:,:,:,1]
-        Dpara=X[:,:,:,2]
-        Wperp=X[:,:,:,3]
-        Wpara=X[:,:,:,4]
-        Wmean=X[:,:,:,5]
-
-        return (Dperp, Dpara, Wperp, Wpara, Wmean)
-
-    @warning_for_keywords()
-    def fast_vectorize_solve(self, data):
-        """
-        Fast vectorize solve
-        """
-        nx, ny, nz, nt = data.shape
-
-        #Ap = design_matrix_A2(bvals)
-
-        Ap = design_matrix_A2(self.ubvals)
-        self.design_matrix_A2 = Ap
-        #logS = _get_powder_average(self.bvals)
-        logS = _get_powder_average(data, self.bvals)
-
-        ATA = Ap.T @ Ap
-        ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
-        AT = Ap.T
-
-        X = ATA_inv @ (AT @ logS)   
-        X = X.reshape(3, nx, ny, nz)
-
-        logS0 = X[0]
-        Dpowder = X[1]
-        Wpowder = X[2]
-
-        return (Dpowder, Wpowder)
-
 
     @warning_for_keywords()
     def fit(self, data, mask=None):
@@ -205,9 +137,10 @@ class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
         mask : array
             A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
         """
-        params_A1 = self.ols_fit_axdki(data)
+        
+        params_A1 = ols_fit_axdki(data, self.gtab, mask=mask)
 
-        params_A2 = self.fast_vectorize_solve(data)
+        params_A2 = fast_vectorize_solve(data, self.ubvals, self.bvals, mask=mask)
 
         params = list(params_A1) + list(params_A2)
 
@@ -307,6 +240,71 @@ class AxialSymmetricDiffusionKurtosisFit:
     def Wpowder(self):
         return self.Wpowder_raw / (self.Dpowder**2 + eps)
 
+
+
+@warning_for_keywords()
+def ols_fit_axdki(data, gtab, mask = None):
+    r"""
+    Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
+    """
+
+    nx, ny, nz, nt = data.shape
+    Nvox = nx * ny * nz
+
+    S = np.log(np.clip(data, 1e-6, None))
+    S = S.reshape(Nvox, nt)
+
+    #Extract eigenvectors based on DTI fit (use fit_method="WLS")
+    principal_eigvec = _get_principal_eigvec(data, gtab)
+
+    A = design_matrix_A1(principal_eigvec, gtab)
+
+    A = A.reshape(Nvox, nt, 6)
+
+    ATA = np.einsum('vti,vtj->vij', A, A)
+    ATy = np.einsum('vti,vt->vi', A, S)
+
+    I = np.eye(6)[None, :, :]  # (1,6,6)
+    ATA_reg = ATA + 1e-6 * I
+
+    X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
+
+    #X[~mask_flat] = 0
+
+    X = X.reshape(nx, ny, nz, 6)
+
+    Dperp=X[:,:,:,1]
+    Dpara=X[:,:,:,2]
+    Wperp=X[:,:,:,3]
+    Wpara=X[:,:,:,4]
+    Wmean=X[:,:,:,5]
+
+    return (Dperp, Dpara, Wperp, Wpara, Wmean)
+
+
+@warning_for_keywords()
+def fast_vectorize_solve(data, ubvals, bvals, mask = None):
+    """
+    Fast vectorize solve
+    """
+    nx, ny, nz, nt = data.shape
+
+    Ap = design_matrix_A2(ubvals)
+
+    logS = _get_powder_average(data, bvals)
+
+    ATA = Ap.T @ Ap
+    ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
+    AT = Ap.T
+
+    X = ATA_inv @ (AT @ logS)
+    X = X.reshape(3, nx, ny, nz)
+
+    #logS0 = X[0]
+    Dpowder = X[1]
+    Wpowder = X[2]
+
+    return (Dpowder, Wpowder)
 
 
 def design_matrix_A1(principal_eigvec, gtab):
