@@ -12,23 +12,57 @@ from dipy.reconst.dti import TensorModel
 from dipy.core.onetime import auto_attr
 
 @warning_for_keywords()
-def axdki_predictions(axdki_params, gtab, *, S0=1):
+def axdki_predictions(axdki_params, gtab, *, S0=1.0):
     """
-    Predict the axial symmetric signal given the parameters of the axial symmetric DKI, an GradientTable object and S0 signal.
+    Predict the axial symmetric signal given the parameters of the axial symmetric DKI,
+    a GradientTable object, and an S0 signal.
 
     Parameters
     ----------
-    axdki_params : ndarray ([X,Y,Z,...], 2)
-        Array containing the axial symmetric diffusivity and axial symmetric signal kurtosis in its last axis.
-        gtab : a GradientTable class instance
-            The gradient table for this prediction
-        S0 : float or ndarray, optional
-            The non diffusion-weighted signal in every voxel, or across all voxels.
+    axdki_params : list or tuple of ndarrays, or a combined ndarray
+        The parameters extracted from the AXDKI model. Expects a sequence containing:
+        (Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw, principal_eigvec)
+        where principal_eigvec has shape (X, Y, Z, ..., 3).
+    gtab : a GradientTable class instance
+        The gradient table for this prediction.
+    S0 : float or ndarray, optional
+        The non-diffusion-weighted signal in every voxel, or across all voxels.
 
-    References
-    ----------
-    .. footbibliography::
+    Returns
+    -------
+    pred_sig : ndarray ([X, Y, Z, ...], g)
+        The predicted diffusion signal along each gradient direction.
     """
+    # Unpack parameters. Note: We need the principal eigenvector to rebuild 
+    # the direction-dependent design matrix A1.
+    Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw, principal_eigvec = axdki_params
+
+    # Generate the voxel-wise directional design matrix (shape: X, Y, Z, directions, 6)
+    A = design_matrix_A1(principal_eigvec, gtab)
+    
+    # Exclude the first column (intercept) from the design matrix, 
+    # because S0 is handled explicitly outside the exponential matrix multiplication.
+    A_decay = A[..., 1:] # shape: (X, Y, Z, directions, 5)
+
+    # Stack the physical parameters along the last axis to align with A_decay columns
+    # shape: (X, Y, Z, 5)
+    params_stack = np.stack([Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw], axis=-1)
+
+    # Compute the linear combination across the 5 structural parameters for each direction
+    # '...d' represents spatial dimensions, 'tg' represents directions/parameters, 't' represents parameters
+    log_decay = np.einsum('...t,...gt->...g', params_stack, A_decay)
+    
+    # Reconstruct the predicted signal decay
+    pred_sig = np.exp(log_decay)
+
+    # Apply S0 weighting matching the MSDKI dimensional constraints
+    if isinstance(S0, (float, int)) or S0.size == 1:
+        pred_sig = S0 * pred_sig
+    else:
+        # Match voxel-wise S0 dimensions by broadcasting along the direction axis
+        pred_sig = S0[..., None] * pred_sig
+
+    return pred_sig
 
 
 @warning_for_keywords()
