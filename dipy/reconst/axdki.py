@@ -255,27 +255,35 @@ def ols_fit_axdki(data, gtab, mask = None):
     nx, ny, nz, nt = data.shape
     Nvox = nx * ny * nz
 
-    S = np.log(np.clip(data, 1e-6, None))
-    S = S.reshape(Nvox, nt)
+    if mask is not None:
+        mask_flat = mask.reshape(-1)           # (Nvox,)
+        data_in_mask = data.reshape(Nvox, nt)[mask_flat]  # (N_in_mask, nt)
+    else:
+        mask_flat = np.ones(Nvox, dtype=bool)
+        data_in_mask = data.reshape(Nvox, nt)
+
+    S = np.log(np.clip(data_in_mask, 1e-6, None))
+    #S = S.reshape(Nvox, nt)
 
     #Extract eigenvectors based on DTI fit (use fit_method="WLS")
-    principal_eigvec = _get_principal_eigvec(data, gtab)
+    principal_eigvec = _get_principal_eigvec(data, gtab, mask=mask)
 
-    A = design_matrix_A1(principal_eigvec, gtab)
+    A = design_matrix_A1(principal_eigvec, gtab)        # (nx,ny,nz, nt, 6)
+    A_flat = A.reshape(Nvox, nt, 6)[mask_flat]  
 
-    A = A.reshape(Nvox, nt, 6)
+    #A = A.reshape(Nvox, nt, 6)
 
-    ATA = np.einsum('vti,vtj->vij', A, A)
-    ATy = np.einsum('vti,vt->vi', A, S)
+    ATA = np.einsum('vti,vtj->vij', A_flat, A_flat)
+    ATy = np.einsum('vti,vt->vi', A_flat, S)
 
     I = np.eye(6)[None, :, :]  # (1,6,6)
     ATA_reg = ATA + 1e-6 * I
 
-    X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
+    X_in_mask = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (N_in_mask, 6)
 
-    #X[~mask_flat] = 0
-
-    X = X.reshape(nx, ny, nz, 6)
+    X_flat = np.zeros((Nvox, 6), dtype=X_in_mask.dtype)
+    X_flat[mask_flat] = X_in_mask
+    X = X_flat.reshape(nx, ny, nz, 6)
 
     Dperp=X[:,:,:,1]
     Dpara=X[:,:,:,2]
@@ -292,19 +300,25 @@ def fast_vectorize_solve(data, ubvals, bvals, mask = None):
     Fast vectorize solve
     """
     nx, ny, nz, nt = data.shape
+    Nvox = nx * ny * nz
 
     Ap = design_matrix_A2(ubvals)
-
     logS = _get_powder_average(data, bvals)
 
-    ATA = Ap.T @ Ap
-    ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
-    AT = Ap.T
+    if mask is not None:
+        mask_flat = mask.reshape(-1)
+        logS_in_mask = logS[:, mask_flat]   # (nb, N_in_mask)
+    else:
+        mask_flat = np.ones(Nvox, dtype=bool)
+        logS_in_mask = logS
 
-    X = ATA_inv @ (AT @ logS)
-    X = X.reshape(3, nx, ny, nz)
+    ATA_inv = np.linalg.inv(Ap.T @ Ap + 1e-6 * np.eye(3))
+    X_in_mask = ATA_inv @ (Ap.T @ logS_in_mask)  # (3, N_in_mask)
 
-    #logS0 = X[0]
+    X_flat = np.zeros((3, Nvox), dtype=X_in_mask.dtype)
+    X_flat[:, mask_flat] = X_in_mask
+    X = X_flat.reshape(3, nx, ny, nz)
+
     Dpowder = X[1]
     Wpowder = X[2]
 
