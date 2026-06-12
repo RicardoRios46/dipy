@@ -20,6 +20,7 @@ python_sources = [
   'test_mapmri.py',
   'test_mcsd.py',
   'test_msdki.py',
+  'test_axdki.py',
   'test_multi_voxel.py',
   'test_odf.py',
   'test_peak_finding.py',
