@@ -1,0 +1,406 @@
+#!/usr/bin/python
+"""Classes and functions for fitting the axial symmetric signal diffusion kurtosis model"""
+
+import numpy as np
+eps = np.finfo(float).eps
+from dipy.reconst.base import ReconstModel
+from dipy.core.gradients import check_multi_b, round_bvals, unique_bvals_magnitude
+
+from dipy.testing.decorators import warning_for_keywords
+from dipy.reconst.dti import TensorModel
+
+from dipy.core.onetime import auto_attr
+
+@warning_for_keywords()
+def axdki_predictions(axdki_params, gtab, *, S0=1.0):
+    """
+    Predict the axial symmetric signal given the parameters of the axial symmetric DKI,
+    a GradientTable object, and an S0 signal.
+
+    Parameters
+    ----------
+    axdki_params : list or tuple of ndarrays, or a combined ndarray
+        The parameters extracted from the AXDKI model. Expects a sequence containing:
+        (Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw, principal_eigvec)
+        where principal_eigvec has shape (X, Y, Z, ..., 3).
+    gtab : a GradientTable class instance
+        The gradient table for this prediction.
+    S0 : float or ndarray, optional
+        The non-diffusion-weighted signal in every voxel, or across all voxels.
+
+    Returns
+    -------
+    pred_sig : ndarray ([X, Y, Z, ...], g)
+        The predicted diffusion signal along each gradient direction.
+    """
+    # Unpack parameters. Note: We need the principal eigenvector to rebuild 
+    # the direction-dependent design matrix A1.
+    Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw, principal_eigvec = axdki_params
+
+    # Generate the voxel-wise directional design matrix (shape: X, Y, Z, directions, 6)
+    A = design_matrix_A1(principal_eigvec, gtab)
+    
+    # Exclude the first column (intercept) from the design matrix, 
+    # because S0 is handled explicitly outside the exponential matrix multiplication.
+    A_decay = A[..., 1:] # shape: (X, Y, Z, directions, 5)
+
+    # Stack the physical parameters along the last axis to align with A_decay columns
+    # shape: (X, Y, Z, 5)
+    params_stack = np.stack([Dperp, Dpara, Wperp_raw, Wpara_raw, Wmean_raw], axis=-1)
+
+    # Compute the linear combination across the 5 structural parameters for each direction
+    # '...d' represents spatial dimensions, 'tg' represents directions/parameters, 't' represents parameters
+    log_decay = np.einsum('...t,...gt->...g', params_stack, A_decay)
+    
+    # Reconstruct the predicted signal decay
+    pred_sig = np.exp(log_decay)
+
+    # Apply S0 weighting matching the MSDKI dimensional constraints
+    if isinstance(S0, (float, int)) or S0.size == 1:
+        pred_sig = S0 * pred_sig
+    else:
+        # Match voxel-wise S0 dimensions by broadcasting along the direction axis
+        pred_sig = S0[..., None] * pred_sig
+
+    return pred_sig
+
+
+@warning_for_keywords()
+def _get_principal_eigvec(data, gtab, mask=None):
+    """
+    Compute the principal eigenvector for the first part of the algorithm.
+
+    Parameters
+    ----------
+        gtab : a GradientTable class instance
+        The gradient table containing diffusion acquisition parameters.
+        m
+        mask : ndarray, optional
+            A boolean array used to mark the coordinates in the data that should be
+            analyzed that has the same shape of the axdki parameters
+    """
+
+    tenmodel = TensorModel(gtab, fit_method="WLS")
+
+    tenfit = tenmodel.fit(data, mask=mask)
+
+    principal_eigenvector = tenfit.evecs.astype(np.float32)[:,:,:,:,0] # extract first eigenvector
+
+    return principal_eigenvector
+
+@warning_for_keywords()
+def _get_powder_average(data, bvals):
+    """
+    Compute powder average
+    """
+    b_unique = np.unique(bvals)
+    b_unique = np.sort(b_unique)
+
+    # tolérance (comme opt.bthresh MATLAB)
+    b_thresh = 50  
+
+    nx, ny, nz, nt = data.shape
+
+    S_powder_list = []
+
+    for b in b_unique:
+        inds = np.abs(bvals - b) < b_thresh
+        # moyenne sur directions
+        S_mean = np.mean(data[..., inds], axis=-1)  # (nx,ny,nz)
+        S_powder_list.append(S_mean)
+
+    S_powder = np.stack(S_powder_list, axis=0)
+    S_powder = np.clip(S_powder, 1e-6, None)
+    logS = np.log(S_powder)
+
+    nb = len(b_unique)
+    Nvox = nx * ny * nz
+
+    logS = logS.reshape(nb, -1)
+
+    return logS
+
+
+class AxialSymmetricDiffusionKurtosisModel(ReconstModel):
+    """Axial Symmetric Diffusion Kurtosis Model"""
+
+    def __init__(self, gtab, *args, bmag=None, return_S0_hat=False, **kwargs):
+        """
+        Axial Symmetric Diffusion Kurtosis Model
+        
+        Parameters
+        ----------
+        gtab : GradientTable class instance
+            Gradient table.
+        
+        args, kwargs : arguments and keyword arguments passed to the fit_method. See msdki.wls_fit_msdki for details.
+
+        References
+        ----------
+        .. footbibliography::
+
+        """
+
+        ReconstModel.__init__(self, gtab)
+
+        self.return_S0_hat = return_S0_hat
+        self.ubvals = unique_bvals_magnitude(gtab.bvals, bmag=bmag)
+        self.bvals = gtab.bvals
+        self.bvecs = gtab.bvecs
+        self.bmag = bmag
+        self.args = args
+        self.kwargs = kwargs
+
+        # Check if at least three b-values are given
+        enough_b = check_multi_b(self.gtab, 2, non_zero=False, bmag=bmag)
+        if not enough_b:
+            e_s = "The `min_signal` key-word argument needs to be strictly"
+            e_s += " postiive."
+            raise ValueError(e_s)
+
+
+    @warning_for_keywords()
+    def fit(self, data, mask=None):
+        """Fit method for the first part of of the AXDKI model class
+        
+        Parameters
+        ----------
+        data : ndarray ([X,Y,Z, ...], g)
+            ndarray containing the data signals in its last dimension.
+
+        mask : array
+            A boolean array used to mark the coordinates in the data that should be analyzed that has the shape data.shape[:-1]
+        """
+        
+        params_A1 = ols_fit_axdki(data, self.gtab, mask=mask)
+
+        params_A2 = fast_vectorize_solve(data, self.ubvals, self.bvals, mask=mask)
+
+        params = list(params_A1) + list(params_A2)
+
+        # ToDo The coward route. Handle the masking inside the fit
+        if mask is not None:
+            params = np.einsum('ijkl,jkl->ijkl', params, mask)
+
+        return AxialSymmetricDiffusionKurtosisFit(self, params)
+    
+    @warning_for_keywords()
+    def predict(self, axdki_params, *, S0=1.0):
+        """
+        Predict a signal for this AxialSymmetricDiffusionKurtosisModel class instance given parameters.
+
+        Parameters
+        ----------
+        axdki_params : ndarray
+            The parameters of the axial symmetric signal diffusion kurtosis model
+        S0 : float or ndarray, optional
+            The non diffusion-weighted signal is every voxel, or across all voxels.
+
+        Returns
+        -------
+        S : (..., N) ndarray
+            Simulated axial symmetric signal based on the axial symmetric signal diffusion kurtosis model
+
+        References
+        ----------
+        .. footbibliography::
+        """
+        return axdki_predictions(axdki_params, self.gtab, S0=S0)
+    
+
+class AxialSymmetricDiffusionKurtosisFit:
+    @warning_for_keywords()
+    def __init__(self, model, model_params, *, model_S0=None):
+        """Initialize a AxialSymmetricDiffusionKurtosisFit class instance."""
+        self.model = model
+        self.model_params = model_params
+        self.model_S0 = model_S0
+        
+    # def __getitem__(self, index):
+    #     model_params = self.model_params
+    #     model_S0 = self.model_S0
+    #     N = model_params.ndim
+    #     if type(index) is not tuple:
+    #         index = (index,)
+    #     elif len(index) >= model_params.ndim:
+    #         raise IndexError("IndexError: invalid index")
+    #     index = index + (slice(None),) * (N - len(index))
+    #     if model_S0 is not None:
+    #         model_S0 = model_S0[index[:-1]]
+    #     return AxialSymmetricDiffusionKurtosisFit(
+    #         self.model, model_params[index], model_S0=model_S0
+    #         )
+    
+    @property
+    def S0_hat(self):
+        return self.model_S0
+
+    @auto_attr
+    def Dperp(self): return self.model_params[0]
+
+    @auto_attr
+    def Dpara(self): return self.model_params[1]
+
+    @auto_attr
+    def Wperp_raw(self): return self.model_params[2]
+
+    @auto_attr
+    def Wpara_raw(self): return self.model_params[3]
+
+    @auto_attr
+    def Wmean_raw(self): return self.model_params[4]
+
+    @auto_attr
+    def Dpowder(self): return self.model_params[5]
+
+    @auto_attr
+    def Wpowder_raw(self): return self.model_params[6]
+
+    @auto_attr
+    def dmean(self):
+        # Now Dpara and Dperp are accessible as self.Dpara and self.Dperp
+        return (1/3 * self.Dpara + 2/3 * self.Dperp)
+
+    @auto_attr
+    def Wperp(self):
+        # Normalized Kurtosis: W / D^2
+        return self.Wperp_raw / (self.Dperp**2 + eps)
+
+    @auto_attr
+    def Wpara(self):
+        return self.Wpara_raw / (self.Dpara**2 + eps)
+
+    @auto_attr
+    def Wmean(self):
+        return self.Wmean_raw / (self.dmean**2 + eps)
+
+    @auto_attr
+    def Wpowder(self):
+        return self.Wpowder_raw / (self.Dpowder**2 + eps)
+
+
+
+@warning_for_keywords()
+def ols_fit_axdki(data, gtab, mask = None):
+    r"""
+    Fit the axial symmetric diffusion kurtosis imaging based on a weighted least square solution.
+    """
+
+    nx, ny, nz, nt = data.shape
+    Nvox = nx * ny * nz
+
+    S = np.log(np.clip(data, 1e-6, None))
+    S = S.reshape(Nvox, nt)
+
+    #Extract eigenvectors based on DTI fit (use fit_method="WLS")
+    principal_eigvec = _get_principal_eigvec(data, gtab)
+
+    A = design_matrix_A1(principal_eigvec, gtab)
+
+    A = A.reshape(Nvox, nt, 6)
+
+    ATA = np.einsum('vti,vtj->vij', A, A)
+    ATy = np.einsum('vti,vt->vi', A, S)
+
+    I = np.eye(6)[None, :, :]  # (1,6,6)
+    ATA_reg = ATA + 1e-6 * I
+
+    X = np.linalg.solve(ATA_reg, ATy[..., None])[..., 0]  # (Nvox,6)
+
+    #X[~mask_flat] = 0
+
+    X = X.reshape(nx, ny, nz, 6)
+
+    Dperp=X[:,:,:,1]
+    Dpara=X[:,:,:,2]
+    Wperp=X[:,:,:,3]
+    Wpara=X[:,:,:,4]
+    Wmean=X[:,:,:,5]
+
+    return (Dperp, Dpara, Wperp, Wpara, Wmean)
+
+
+@warning_for_keywords()
+def fast_vectorize_solve(data, ubvals, bvals, mask = None):
+    """
+    Fast vectorize solve
+    """
+    nx, ny, nz, nt = data.shape
+
+    Ap = design_matrix_A2(ubvals)
+
+    logS = _get_powder_average(data, bvals)
+
+    ATA = Ap.T @ Ap
+    ATA_inv = np.linalg.inv(ATA + 1e-6 * np.eye(3))
+    AT = Ap.T
+
+    X = ATA_inv @ (AT @ logS)
+    X = X.reshape(3, nx, ny, nz)
+
+    #logS0 = X[0]
+    Dpowder = X[1]
+    Wpowder = X[2]
+
+    return (Dpowder, Wpowder)
+
+
+def design_matrix_A1(principal_eigvec, gtab):
+    """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
+    
+    Parameters
+    ----------
+    ubvals : array
+        Containing the unique b-values of the data.
+
+    Returns
+    -------
+    design_matrix : array
+    """
+
+    bvals = gtab.bvals
+    bvecs = gtab.bvecs
+
+    # calculus of cos(theta)
+    cos_theta = np.einsum('xyzi,ti->xyzt', principal_eigvec, bvecs)
+    
+    b = bvals[None, None, None, :]
+    c = cos_theta
+    c2 = c**2
+    c4 = c**4
+
+    A = np.empty(c.shape + (6,), dtype=c.dtype)
+
+    A[..., 0] = 1
+    A[..., 1] = -b * (1 - c2)
+    A[..., 2] = -b * c2
+    A[..., 3] = (b**2 / 6) * (5*c4 - 6*c2 + 1)
+    A[..., 4] = (b**2 / 6) * (0.5 * c2 * (5*c2 - 3))
+    A[..., 5] = (b**2 / 6) * (-15/2 * (c4 - c2))
+
+    return A
+
+def design_matrix_A2(ubvals):
+    """Constructs design matrix for the axial symmetric signal diffusion kurtosis model
+    
+    Parameters
+    ----------
+    ubvals : array
+        Containing the unique b-values of the data.
+
+    Returns
+    -------
+    design_matrix : array
+    """
+    b_unique = np.unique(ubvals)
+    b_unique = np.sort(b_unique)
+
+    b = b_unique[:, None]  # (nb,1)
+
+    Ap = np.concatenate([
+        np.ones_like(b),   # S0
+        -b,                # D
+        (b**2) / 6         # W
+    ], axis=1)             # (nb, 3)
+
+    return Ap
