@@ -94,64 +94,122 @@ _DATA = _make_data(_GTAB)
 # ---------------------------------------------------------------------------
 
 class TestDesignMatrices:
-    """Unit tests for design_matrix_A1 and design_matrix_A2."""
+    """Unit tests for design_matrix_A1 and design_matrix_A2.
+
+    A1 is verified analytically on three canonical eigenvector/gradient
+    configurations where cos(theta) takes known values (0, 1, 1/√2),
+    covering every column formula independently, following the same pattern
+    as test_design_matrix in test_msdki.py.
+    """
+
+    # ------------------------------------------------------------------
+    # Shared minimal gtab for analytical A1 tests
+    # b=0 (intercept only), b=1000 parallel, b=1000 perpendicular,
+    # b=2000 diagonal (45°) — four rows, all formulas exercised.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _minimal_gtab_and_eigvec():
+        """1-voxel gtab with four analytically tractable gradient directions."""
+        bvals = np.array([0.0, 1000.0, 1000.0, 2000.0])
+        bvecs = np.array([
+            [1.0, 0.0, 0.0],                    # b0 placeholder
+            [1.0, 0.0, 0.0],                    # parallel to eigvec  → c=1
+            [0.0, 1.0, 0.0],                    # perpendicular       → c=0
+            [1.0 / np.sqrt(2), 1.0 / np.sqrt(2), 0.0],  # 45°          → c=1/√2
+        ])
+        gtab = gradient_table(bvals, bvecs=bvecs)
+        eigvec = np.zeros((1, 1, 1, 3))
+        eigvec[0, 0, 0, 0] = 1.0  # x-aligned
+        return gtab, eigvec
+
+    @staticmethod
+    def _A1_ground_truth(bvals):
+        """Analytical A1 for eigvec=[1,0,0] and the four canonical directions."""
+        # cos(theta) per direction: [0 (b0), 1 (parallel), 0 (perp), 1/√2 (diag)]
+        c = np.array([1.0, 1.0, 0.0, 1.0 / np.sqrt(2)])  # col0 uses bvec[0] too
+        # but b0 row has b=0, so all decay terms vanish regardless of c
+        b = bvals
+        c2 = c ** 2
+        c4 = c ** 4
+        A_gt = np.zeros((4, 6))
+        A_gt[:, 0] = 1.0
+        A_gt[:, 1] = -b * (1 - c2)
+        A_gt[:, 2] = -b * c2
+        A_gt[:, 3] = (b ** 2 / 6) * (5 * c4 - 6 * c2 + 1)
+        A_gt[:, 4] = (b ** 2 / 6) * (0.5 * c2 * (5 * c2 - 3))
+        A_gt[:, 5] = (b ** 2 / 6) * (-15.0 / 2 * (c4 - c2))
+        return A_gt
+
+    def test_A1_full_matrix_analytical(self):
+        """A1 must exactly match analytical formula for all 6 columns and 4 dirs."""
+        gtab, eigvec = self._minimal_gtab_and_eigvec()
+        A1 = design_matrix_A1(eigvec, gtab)     # (1,1,1,4,6)
+        A1_voxel = A1[0, 0, 0]                  # (4,6)
+        A_gt = self._A1_ground_truth(gtab.bvals)
+        npt.assert_array_almost_equal(A1_voxel, A_gt)
 
     def test_A1_shape(self):
         """A1 must have shape (X, Y, Z, n_dirs, 6)."""
         nx, ny, nz = _DATA.shape[:3]
         n_dirs = len(_GTAB.bvals)
         eigvec = np.zeros((nx, ny, nz, 3))
-        eigvec[..., 0] = 1.0  # x-aligned principal eigenvector
+        eigvec[..., 0] = 1.0
 
         A1 = design_matrix_A1(eigvec, _GTAB)
 
         npt.assert_equal(A1.shape, (nx, ny, nz, n_dirs, 6))
 
-    def test_A1_intercept_column_is_ones(self):
-        """First column of A1 (intercept) must be identically 1."""
-        nx, ny, nz = _DATA.shape[:3]
-        eigvec = np.zeros((nx, ny, nz, 3))
-        eigvec[..., 0] = 1.0
+    def test_A1_parallel_direction_only_Dpara_Wpara_nonzero(self):
+        """For bvec ∥ eigvec (c=1): only Dpara and Wpara columns are non-zero."""
+        gtab, eigvec = self._minimal_gtab_and_eigvec()
+        A1 = design_matrix_A1(eigvec, gtab)[0, 0, 0]  # (4,6)
+        b = 1000.0
+        # direction index 1: parallel
+        npt.assert_almost_equal(A1[1, 1], 0.0)               # Dperp = 0
+        npt.assert_almost_equal(A1[1, 2], -b)                 # Dpara = -b
+        npt.assert_almost_equal(A1[1, 3], 0.0)               # Wperp = 0
+        npt.assert_almost_equal(A1[1, 4], b ** 2 / 6)        # Wpara = b²/6
+        npt.assert_almost_equal(A1[1, 5], 0.0)               # Wmean = 0
 
-        A1 = design_matrix_A1(eigvec, _GTAB)
+    def test_A1_perpendicular_direction_only_Dperp_Wperp_nonzero(self):
+        """For bvec ⊥ eigvec (c=0): only Dperp and Wperp columns are non-zero."""
+        gtab, eigvec = self._minimal_gtab_and_eigvec()
+        A1 = design_matrix_A1(eigvec, gtab)[0, 0, 0]
+        b = 1000.0
+        # direction index 2: perpendicular
+        npt.assert_almost_equal(A1[2, 1], -b)                # Dperp = -b
+        npt.assert_almost_equal(A1[2, 2], 0.0)               # Dpara = 0
+        npt.assert_almost_equal(A1[2, 3], b ** 2 / 6)       # Wperp = b²/6
+        npt.assert_almost_equal(A1[2, 4], 0.0)               # Wpara = 0
+        npt.assert_almost_equal(A1[2, 5], 0.0)               # Wmean = 0
 
-        npt.assert_array_equal(A1[..., 0], 1.0)
+    def test_A1_diagonal_direction_Wmean_nonzero(self):
+        """For bvec at 45° (c=1/√2): Wmean cross-term must be non-zero."""
+        gtab, eigvec = self._minimal_gtab_and_eigvec()
+        A1 = design_matrix_A1(eigvec, gtab)[0, 0, 0]
+        b = 2000.0
+        c2, c4 = 0.5, 0.25
+        expected_Wmean = (b ** 2 / 6) * (-15.0 / 2 * (c4 - c2))
+        # direction index 3: 45°
+        npt.assert_almost_equal(A1[3, 5], expected_Wmean)
 
-    def test_A1_b0_rows_are_intercept_only(self):
-        """For b=0 directions all decay columns must be zero."""
-        nx, ny, nz = _DATA.shape[:3]
-        eigvec = np.zeros((nx, ny, nz, 3))
-        eigvec[..., 0] = 1.0
+    def test_A1_b0_rows_decay_terms_are_zero(self):
+        """For b=0: all decay columns (1–5) must vanish regardless of direction."""
+        gtab, eigvec = self._minimal_gtab_and_eigvec()
+        A1 = design_matrix_A1(eigvec, gtab)[0, 0, 0]
+        npt.assert_array_almost_equal(A1[0, 1:], 0.0)
 
-        A1 = design_matrix_A1(eigvec, _GTAB)
-        b0_mask = _GTAB.bvals == 0
-
-        # Columns 1-5 encode b-dependent terms — must vanish at b=0
-        npt.assert_array_almost_equal(A1[..., b0_mask, 1:], 0.0)
-
-    def test_A2_shape(self):
-        """A2 must have shape (n_unique_shells, 3)."""
-        ubvals = np.array([0, 1000, 2000, 3000], dtype=float)
+    def test_A2_full_matrix_analytical(self):
+        """A2 must exactly match the analytical ground truth for all columns."""
+        ubvals = np.array([0.0, 1000.0, 2000.0, 3000.0])
         A2 = design_matrix_A2(ubvals)
+
+        A2_gt = np.ones((4, 3))
+        A2_gt[:, 1] = -ubvals
+        A2_gt[:, 2] = ubvals ** 2 / 6.0
+
         npt.assert_equal(A2.shape, (4, 3))
-
-    def test_A2_first_column_ones(self):
-        """First column of A2 (S0 term) must be all ones."""
-        ubvals = np.array([0, 1000, 2000, 3000], dtype=float)
-        A2 = design_matrix_A2(ubvals)
-        npt.assert_array_almost_equal(A2[:, 0], np.ones(4))
-
-    def test_A2_diffusivity_column(self):
-        """Second column of A2 must equal -b (negative b-values)."""
-        ubvals = np.array([0, 1000, 2000, 3000], dtype=float)
-        A2 = design_matrix_A2(ubvals)
-        npt.assert_array_almost_equal(A2[:, 1], -ubvals)
-
-    def test_A2_kurtosis_column(self):
-        """Third column of A2 must equal b²/6."""
-        ubvals = np.array([0, 1000, 2000, 3000], dtype=float)
-        A2 = design_matrix_A2(ubvals)
-        npt.assert_array_almost_equal(A2[:, 2], ubvals ** 2 / 6.0)
+        npt.assert_array_almost_equal(A2, A2_gt)
 
 
 # ---------------------------------------------------------------------------
